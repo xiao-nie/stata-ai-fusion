@@ -233,6 +233,7 @@ class StataSession:
         self.installation = installation
         self.session_id = session_id
         self._process: pexpect.spawn | None = None  # type: ignore[union-attr]
+        self._lock: anyio.Lock = anyio.Lock()
         self._log_buffer: list[str] = []
         self._tmpdir: Path = _make_temp_dir()
         self._graph_cache: GraphCache = GraphCache(self._tmpdir)
@@ -267,7 +268,9 @@ class StataSession:
         )
 
         # Run pexpect spawn in a thread because it blocks.
-        self._process = await anyio.to_thread.run_sync(self._spawn_process)
+        self._process = await anyio.to_thread.run_sync(
+            self._spawn_process, abandon_on_cancel=True,
+        )
         self._started = True
         log.info("Session %s started successfully", self.session_id)
 
@@ -327,6 +330,30 @@ class StataSession:
             return False
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _kill_process(self) -> None:
+        """Forcefully kill the Stata process and mark for restart.
+
+        Called after a timeout or other unrecoverable state corruption so
+        that :meth:`_ensure_alive` will spawn a clean process on the next
+        :meth:`execute` call.
+        """
+        if self._process is not None:
+            try:
+                if self._process.isalive():
+                    self._process.terminate(force=True)
+            except Exception:
+                log.warning(
+                    "Error killing session %s process",
+                    self.session_id,
+                    exc_info=True,
+                )
+            self._process = None
+        self._started = False
+
+    # ------------------------------------------------------------------
     # Auto-restart
     # ------------------------------------------------------------------
 
@@ -355,6 +382,9 @@ class StataSession:
         and executes it with Stata's ``do`` command, then captures all output
         until the prompt returns.
 
+        A per-session async lock ensures that only one command runs at a time,
+        preventing concurrent access to the shared ``pexpect`` process.
+
         Parameters
         ----------
         code:
@@ -366,110 +396,132 @@ class StataSession:
         -------
         ExecutionResult
         """
-        await self._ensure_alive()
-        assert self._process is not None  # guaranteed by _ensure_alive
+        async with self._lock:
+            await self._ensure_alive()
+            assert self._process is not None  # guaranteed by _ensure_alive
 
-        # Inject graph export if the code draws a graph but has no export.
-        code = maybe_inject_graph_export(code, self._tmpdir)
+            # Inject graph export if the code draws a graph but has no export.
+            code = maybe_inject_graph_export(code, self._tmpdir)
 
-        # Snapshot graph files before execution.
-        self._graph_cache.take_snapshot()
+            # Snapshot graph files before execution.
+            self._graph_cache.take_snapshot()
 
-        start_time = time.monotonic()
+            start_time = time.monotonic()
 
-        # Write code to a temp .do file.
-        do_file = self._tmpdir / f"_cmd_{uuid.uuid4().hex[:12]}.do"
-        do_file.write_text(code, encoding="utf-8")
+            # Write code to a temp .do file.
+            do_file = self._tmpdir / f"_cmd_{uuid.uuid4().hex[:12]}.do"
+            do_file.write_text(code, encoding="utf-8")
 
-        try:
-            raw_output = await anyio.to_thread.run_sync(
-                lambda: self._run_do_file(do_file, timeout),
-            )
-        except pexpect.TIMEOUT:
-            elapsed = time.monotonic() - start_time
-            return ExecutionResult(
-                output="",
-                return_code=1,
-                error_message=f"Command timed out after {timeout}s",
-                error_code=None,
-                graphs=[],
-                execution_time=elapsed,
-                log_path=None,
-            )
-        except pexpect.EOF:
-            elapsed = time.monotonic() - start_time
-            self._process = None
-            self._started = False
-            return ExecutionResult(
-                output="",
-                return_code=1,
-                error_message="Stata process terminated unexpectedly",
-                error_code=None,
-                graphs=[],
-                execution_time=elapsed,
-                log_path=None,
-            )
-        finally:
-            # Clean up the temp .do file.
             try:
-                do_file.unlink(missing_ok=True)
-            except OSError:
-                pass
+                raw_output = await anyio.to_thread.run_sync(
+                    lambda: self._run_do_file(do_file, timeout),
+                    # NOTE: Do NOT use abandon_on_cancel here.  The lock
+                    # protects self._process; if we abandon the thread the
+                    # lock is released while the thread is still inside
+                    # pexpect.expect(), and the next caller would corrupt
+                    # the pexpect state.  The deadline-based timeout in
+                    # _run_do_file guarantees bounded execution.
+                )
+            except pexpect.TIMEOUT:
+                elapsed = time.monotonic() - start_time
+                # After a timeout the pexpect buffer is in an unknown
+                # state (partial output, Stata may still be running the
+                # timed-out command).  Kill the process so _ensure_alive()
+                # spawns a clean one on the next call.
+                self._kill_process()
+                return ExecutionResult(
+                    output="",
+                    return_code=1,
+                    error_message=f"Command timed out after {timeout}s. "
+                    "Session will auto-restart on next command.",
+                    error_code=None,
+                    graphs=[],
+                    execution_time=elapsed,
+                    log_path=None,
+                )
+            except pexpect.EOF:
+                elapsed = time.monotonic() - start_time
+                self._process = None
+                self._started = False
+                return ExecutionResult(
+                    output="",
+                    return_code=1,
+                    error_message="Stata process terminated unexpectedly",
+                    error_code=None,
+                    graphs=[],
+                    execution_time=elapsed,
+                    log_path=None,
+                )
+            finally:
+                # Clean up the temp .do file.
+                try:
+                    do_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
-        elapsed = time.monotonic() - start_time
+            elapsed = time.monotonic() - start_time
 
-        # Strip SMCL markup.
-        cleaned = strip_smcl(raw_output)
+            # Strip SMCL markup.
+            cleaned = strip_smcl(raw_output)
 
-        # Remove the echoed "do" command line and trailing prompt noise.
-        cleaned = self._clean_do_output(cleaned, do_file)
+            # Remove the echoed "do" command line and trailing prompt noise.
+            cleaned = self._clean_do_output(cleaned, do_file)
 
-        # Detect errors.
-        error_message, error_code = _detect_error(cleaned)
-        return_code = 0 if error_code is None and error_message is None else 1
+            # Detect errors.
+            error_message, error_code = _detect_error(cleaned)
+            return_code = 0 if error_code is None and error_message is None else 1
 
-        # Detect new graph files.
-        graphs = self._graph_cache.detect_changes()
+            # Detect new graph files.
+            graphs = self._graph_cache.detect_changes()
 
-        # Append to log buffer.
-        self._log_buffer.append(cleaned)
+            # Append to log buffer.
+            self._log_buffer.append(cleaned)
 
-        log.debug(
-            "Session %s execute completed in %.2fs (rc=%d, graphs=%d)",
-            self.session_id,
-            elapsed,
-            return_code,
-            len(graphs),
-        )
+            log.debug(
+                "Session %s execute completed in %.2fs (rc=%d, graphs=%d)",
+                self.session_id,
+                elapsed,
+                return_code,
+                len(graphs),
+            )
 
-        return ExecutionResult(
-            output=cleaned,
-            return_code=return_code,
-            error_message=error_message,
-            error_code=error_code,
-            graphs=graphs,
-            execution_time=elapsed,
-            log_path=None,
-        )
+            return ExecutionResult(
+                output=cleaned,
+                return_code=return_code,
+                error_message=error_message,
+                error_code=error_code,
+                graphs=graphs,
+                execution_time=elapsed,
+                log_path=None,
+            )
 
     def _run_do_file(self, do_file: Path, timeout: int) -> str:
-        """Synchronous helper: send ``do "file"`` and collect output until prompt."""
+        """Synchronous helper: send ``do "file"`` and collect output until prompt.
+
+        Uses a **deadline-based** total timeout so that continuation prompts
+        cannot reset the clock and cause unbounded waiting.
+        """
         assert self._process is not None
 
         cmd = f'do "{do_file}"'
         self._process.sendline(cmd)
 
-        # Wait for the prompt to return. Stata may produce continuation
-        # prompts "> " for multi-line constructs — we keep reading past
-        # those until the primary prompt ". " appears.
+        # Use an absolute deadline so the total wait never exceeds *timeout*
+        # seconds, even when Stata produces many continuation prompts.
+        deadline = time.monotonic() + timeout
         output_parts: list[str] = []
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise pexpect.TIMEOUT(
+                    f"Total execution timeout exceeded ({timeout}s)"
+                )
             idx = self._process.expect(
                 [
                     _PROMPT_PATTERN,  # 0 — primary prompt
                     _CONTINUATION_PATTERN,  # 1 — continuation prompt
                 ],
-                timeout=timeout,
+                timeout=remaining,
             )
             # Capture everything printed before the matched pattern.
             before = self._process.before or ""
@@ -553,6 +605,7 @@ class BatchSession:
     ) -> None:
         self.installation = installation
         self.session_id = session_id
+        self._lock: anyio.Lock = anyio.Lock()
         self._tmpdir: Path = _make_temp_dir()
         self._graph_cache: GraphCache = GraphCache(self._tmpdir)
         self._log_buffer: list[str] = []
@@ -583,72 +636,79 @@ class BatchSession:
     # ------------------------------------------------------------------
 
     async def execute(self, code: str, timeout: int = _DEFAULT_TIMEOUT) -> ExecutionResult:
-        """Execute Stata code in batch mode."""
-        if not self._started:
-            await self.start()
+        """Execute Stata code in batch mode.
 
-        # Inject graph export if needed.
-        code = maybe_inject_graph_export(code, self._tmpdir)
+        A per-session async lock serializes concurrent calls.
+        """
+        async with self._lock:
+            if not self._started:
+                await self.start()
 
-        # Snapshot graph files.
-        self._graph_cache.take_snapshot()
+            # Inject graph export if needed.
+            code = maybe_inject_graph_export(code, self._tmpdir)
 
-        start_time = time.monotonic()
+            # Snapshot graph files.
+            self._graph_cache.take_snapshot()
 
-        # Write code to a temp .do file.
-        do_name = f"_batch_{uuid.uuid4().hex[:12]}"
-        do_file = self._tmpdir / f"{do_name}.do"
-        log_file = self._tmpdir / f"{do_name}.log"
-        do_file.write_text(code, encoding="utf-8")
+            start_time = time.monotonic()
 
-        try:
-            raw_output = await anyio.to_thread.run_sync(
-                lambda: self._run_batch(do_file, log_file, timeout),
-            )
-        except subprocess.TimeoutExpired:
+            # Write code to a temp .do file.
+            do_name = f"_batch_{uuid.uuid4().hex[:12]}"
+            do_file = self._tmpdir / f"{do_name}.do"
+            log_file = self._tmpdir / f"{do_name}.log"
+            do_file.write_text(code, encoding="utf-8")
+
+            try:
+                raw_output = await anyio.to_thread.run_sync(
+                    lambda: self._run_batch(do_file, log_file, timeout),
+                    # NOTE: Do NOT use abandon_on_cancel here.  The
+                    # subprocess.run timeout guarantees bounded execution,
+                    # and keeping the lock held prevents concurrent access.
+                )
+            except subprocess.TimeoutExpired:
+                elapsed = time.monotonic() - start_time
+                return ExecutionResult(
+                    output="",
+                    return_code=1,
+                    error_message=f"Batch command timed out after {timeout}s",
+                    error_code=None,
+                    graphs=[],
+                    execution_time=elapsed,
+                    log_path=log_file if log_file.exists() else None,
+                )
+
             elapsed = time.monotonic() - start_time
+
+            # Strip SMCL.
+            cleaned = strip_smcl(raw_output)
+
+            # Detect errors.
+            error_message, error_code = _detect_error(cleaned)
+            return_code = 0 if error_code is None and error_message is None else 1
+
+            # Detect new graph files.
+            graphs = self._graph_cache.detect_changes()
+
+            # Append to log buffer.
+            self._log_buffer.append(cleaned)
+
+            log.debug(
+                "BatchSession %s execute completed in %.2fs (rc=%d, graphs=%d)",
+                self.session_id,
+                elapsed,
+                return_code,
+                len(graphs),
+            )
+
             return ExecutionResult(
-                output="",
-                return_code=1,
-                error_message=f"Batch command timed out after {timeout}s",
-                error_code=None,
-                graphs=[],
+                output=cleaned,
+                return_code=return_code,
+                error_message=error_message,
+                error_code=error_code,
+                graphs=graphs,
                 execution_time=elapsed,
                 log_path=log_file if log_file.exists() else None,
             )
-
-        elapsed = time.monotonic() - start_time
-
-        # Strip SMCL.
-        cleaned = strip_smcl(raw_output)
-
-        # Detect errors.
-        error_message, error_code = _detect_error(cleaned)
-        return_code = 0 if error_code is None and error_message is None else 1
-
-        # Detect new graph files.
-        graphs = self._graph_cache.detect_changes()
-
-        # Append to log buffer.
-        self._log_buffer.append(cleaned)
-
-        log.debug(
-            "BatchSession %s execute completed in %.2fs (rc=%d, graphs=%d)",
-            self.session_id,
-            elapsed,
-            return_code,
-            len(graphs),
-        )
-
-        return ExecutionResult(
-            output=cleaned,
-            return_code=return_code,
-            error_message=error_message,
-            error_code=error_code,
-            graphs=graphs,
-            execution_time=elapsed,
-            log_path=log_file if log_file.exists() else None,
-        )
 
     def _run_batch(self, do_file: Path, log_file: Path, timeout: int) -> str:
         """Synchronous helper: run Stata in batch mode and read the log."""
@@ -704,6 +764,7 @@ class SessionManager:
         use_batch: bool | None = None,
     ) -> None:
         self._sessions: dict[str, StataSession | BatchSession] = {}
+        self._lock: anyio.Lock = anyio.Lock()
         self.installation = installation
         if use_batch is None:
             self._use_batch = not HAS_PEXPECT
@@ -720,6 +781,9 @@ class SessionManager:
     ) -> StataSession | BatchSession:
         """Return an existing session or create and start a new one.
 
+        A manager-level lock prevents TOCTOU races where concurrent
+        callers with the same *session_id* could both create sessions.
+
         Parameters
         ----------
         session_id:
@@ -729,40 +793,42 @@ class SessionManager:
         -------
         StataSession | BatchSession
         """
-        if session_id in self._sessions:
-            session = self._sessions[session_id]
-            # Auto-restart if dead.
-            if not session.is_alive:
-                log.warning(
-                    "Session %s is dead; removing and re-creating",
-                    session_id,
-                )
-                del self._sessions[session_id]
+        async with self._lock:
+            if session_id in self._sessions:
+                session = self._sessions[session_id]
+                # Auto-restart if dead.
+                if not session.is_alive:
+                    log.warning(
+                        "Session %s is dead; removing and re-creating",
+                        session_id,
+                    )
+                    del self._sessions[session_id]
+                else:
+                    return session
+
+            log.info(
+                "Creating new %s session: %s",
+                "batch" if self._use_batch else "interactive",
+                session_id,
+            )
+
+            session: StataSession | BatchSession
+            if self._use_batch:
+                session = BatchSession(self.installation, session_id=session_id)
             else:
-                return session
+                session = StataSession(self.installation, session_id=session_id)
 
-        log.info(
-            "Creating new %s session: %s",
-            "batch" if self._use_batch else "interactive",
-            session_id,
-        )
-
-        session: StataSession | BatchSession
-        if self._use_batch:
-            session = BatchSession(self.installation, session_id=session_id)
-        else:
-            session = StataSession(self.installation, session_id=session_id)
-
-        await session.start()
-        self._sessions[session_id] = session
-        return session
+            await session.start()
+            self._sessions[session_id] = session
+            return session
 
     async def close_session(self, session_id: str) -> None:
         """Close and remove a single session by ID.
 
         Silently ignores unknown session IDs.
         """
-        session = self._sessions.pop(session_id, None)
+        async with self._lock:
+            session = self._sessions.pop(session_id, None)
         if session is not None:
             await session.close()
             log.info("Session %s closed and removed", session_id)
@@ -773,8 +839,10 @@ class SessionManager:
         Each entry is a dict with keys ``"session_id"``, ``"alive"``,
         and ``"type"``.
         """
+        async with self._lock:
+            snapshot = list(self._sessions.items())
         result: list[dict] = []
-        for sid, session in self._sessions.items():
+        for sid, session in snapshot:
             result.append(
                 {
                     "session_id": sid,
@@ -786,7 +854,8 @@ class SessionManager:
 
     async def close_all(self) -> None:
         """Close every tracked session."""
-        session_ids = list(self._sessions.keys())
+        async with self._lock:
+            session_ids = list(self._sessions.keys())
         for sid in session_ids:
             await self.close_session(sid)
         log.info("All sessions closed")

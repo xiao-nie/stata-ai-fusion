@@ -7,6 +7,7 @@ community-contributed package from SSC or a custom source.
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from mcp.types import TextContent, Tool
@@ -69,6 +70,16 @@ async def handle(
         return [TextContent(type="text", text="Error: no package name provided.")]
 
     package = package.strip()
+
+    # Validate package name to prevent Stata command injection.
+    # Stata package names are alphanumeric with optional underscores/hyphens.
+    if not re.fullmatch(r"[A-Za-z0-9_\-]+", package):
+        return [
+            TextContent(
+                type="text",
+                text="Error: package name must contain only alphanumerics, underscores, and hyphens.",
+            )
+        ]
 
     try:
         session = await session_manager.get_or_create(session_id)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 import time
 from typing import TYPE_CHECKING
 
@@ -83,9 +84,18 @@ async def handle(
         log.error("Failed to get/create session %s: %s", session_id, exc)
         return [TextContent(type="text", text=f"Error creating session: {exc}")]
 
-    # Build the output path
+    # Build the output path — sanitize the filename to prevent path
+    # traversal and Stata command injection via embedded quotes.
     if filename and filename.strip():
         stem = filename.strip()
+        # Allow only alphanumerics, underscores, hyphens, and dots (no slashes or quotes).
+        if not re.fullmatch(r"[A-Za-z0-9_.\-]+", stem):
+            return [
+                TextContent(
+                    type="text",
+                    text="Error: filename must contain only alphanumerics, underscores, hyphens, and dots.",
+                )
+            ]
     else:
         stem = f"stata_graph_{int(time.time() * 1000)}"
     out_name = f"{stem}.{fmt}"
