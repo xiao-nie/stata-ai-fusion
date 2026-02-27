@@ -47,6 +47,10 @@ _CONTINUATION_PATTERN = r"\r?\n> $"
 _DEFAULT_TIMEOUT = 120
 _START_TIMEOUT = 30
 
+# Maximum number of entries kept in the per-session log buffer.
+# Older entries are evicted in FIFO order to bound memory usage.
+_MAX_LOG_BUFFER_ENTRIES = 1000
+
 # ---------------------------------------------------------------------------
 # SMCL tag stripping
 # ---------------------------------------------------------------------------
@@ -519,7 +523,7 @@ class StataSession:
                 try:
                     do_file.unlink(missing_ok=True)
                 except OSError:
-                    pass
+                    log.debug("Failed to clean up temp do-file: %s", do_file)
 
             elapsed = time.monotonic() - start_time
 
@@ -536,8 +540,10 @@ class StataSession:
             # Detect new graph files.
             graphs = self._graph_cache.detect_changes()
 
-            # Append to log buffer.
+            # Append to log buffer (FIFO eviction to bound memory).
             self._log_buffer.append(cleaned)
+            if len(self._log_buffer) > _MAX_LOG_BUFFER_ENTRIES:
+                self._log_buffer = self._log_buffer[-_MAX_LOG_BUFFER_ENTRIES:]
 
             log.debug(
                 "Session %s execute completed in %.2fs (rc=%d, graphs=%d)",
@@ -779,8 +785,10 @@ class BatchSession:
             # Detect new graph files.
             graphs = self._graph_cache.detect_changes()
 
-            # Append to log buffer.
+            # Append to log buffer (FIFO eviction to bound memory).
             self._log_buffer.append(cleaned)
+            if len(self._log_buffer) > _MAX_LOG_BUFFER_ENTRIES:
+                self._log_buffer = self._log_buffer[-_MAX_LOG_BUFFER_ENTRIES:]
 
             log.debug(
                 "BatchSession %s execute completed in %.2fs (rc=%d, graphs=%d)",

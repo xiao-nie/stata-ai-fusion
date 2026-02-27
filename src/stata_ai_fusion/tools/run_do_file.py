@@ -68,7 +68,7 @@ async def handle(
     """Execute a Stata .do file in batch mode and return content blocks."""
     raw_path: str = arguments.get("path", "")
     session_id: str = arguments.get("session_id", "default")
-    timeout: int = arguments.get("timeout", 300)
+    timeout: int = max(1, min(int(arguments.get("timeout", 300)), 3600))
 
     # ---- Input validation ------------------------------------------------
 
@@ -138,7 +138,7 @@ async def handle(
                 raise
             return proc.returncode
 
-        await anyio.to_thread.run_sync(_run_batch)
+        batch_rc = await anyio.to_thread.run_sync(_run_batch)
 
     except subprocess.TimeoutExpired:
         elapsed = time.monotonic() - start_time
@@ -180,6 +180,11 @@ async def handle(
     # ---- Error detection -------------------------------------------------
 
     error_message, error_code = _detect_error(cleaned)
+
+    # If Stata exited with a non-zero return code but _detect_error didn't
+    # find a specific error, flag the non-zero exit explicitly.
+    if batch_rc and batch_rc != 0 and error_message is None:
+        error_message = f"Stata exited with return code {batch_rc}"
 
     # ---- Graph detection -------------------------------------------------
 

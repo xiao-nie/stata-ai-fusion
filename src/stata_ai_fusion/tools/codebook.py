@@ -80,7 +80,7 @@ async def handle(
         code = "codebook, compact"
 
     try:
-        result = await session.execute(code, timeout=60)
+        result = await session.execute(code, timeout=120)
     except Exception as exc:
         log.error("Execution error in session %s: %s", session_id, exc)
         return [TextContent(type="text", text=f"Execution error: {exc}")]

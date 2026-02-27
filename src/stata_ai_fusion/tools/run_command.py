@@ -64,7 +64,7 @@ async def handle(
     code: str = arguments.get("code", "")
     echo: bool = arguments.get("echo", True)
     session_id: str = arguments.get("session_id", "default")
-    timeout: int = arguments.get("timeout", 120)
+    timeout: int = max(1, min(int(arguments.get("timeout", 120)), 3600))
 
     if not code.strip():
         return [TextContent(type="text", text="Error: no code provided.")]
