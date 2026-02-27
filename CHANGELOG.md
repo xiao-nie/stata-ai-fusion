@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.2 (2026-02-27)
+
+### Security
+- **Codebook command injection prevention**: Variable names are now validated against a strict regex before being embedded in Stata commands
+- **Graph export path safety**: Uses `cd` + relative filename instead of embedding the full tmpdir path in Stata commands; auto-generated filenames use UUID instead of timestamps
+
+### Bug Fixes
+- **Windows StataBE-64 detection**: Added `statabe-64` to edition map so Windows BE edition is correctly identified (was falling back to IC)
+- **search_log avoids unnecessary session creation**: Uses `get_session()` instead of `get_or_create()` to prevent spinning up a new Stata process just to search an empty log
+- **Output preservation in `_clean_do_output`**: Refined `. ` stripping to only remove echoed command lines (starting with letters/underscores), preserving numeric output that happens to start with `. `
+- **Batch return code captured**: `run_do_file` now reports non-zero Stata exit codes instead of silently ignoring them
+- **`width` parameter validation**: `export_graph` rejects width values outside 100–10000 to prevent resource exhaustion
+- **`timeout` parameter clamped**: `run_command` and `run_do_file` clamp timeout to 1–3600s to prevent negative or unbounded values
+
+### Internal
+- Removed dead `register()` functions and unused `Server` imports from all 9 tool modules
+- Removed unused `_EDITION_PRIORITY` constant and empty `TYPE_CHECKING` block
+- Added `py.typed` marker for PEP 561 type checker support
+- Log buffer capped at 1000 entries (FIFO eviction) to bound memory usage
+- Temp `.do` file cleanup failures now logged at debug level
+
 ## 0.2.1 (2026-02-27)
 
 ### Bug Fixes
