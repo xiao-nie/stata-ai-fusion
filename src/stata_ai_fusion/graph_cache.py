@@ -237,33 +237,61 @@ _HAS_EXPORT_RE = re.compile(
 
 
 def maybe_inject_graph_export(code: str, tmpdir: Path) -> str:
-    """Append a ``graph export`` command if the code draws a graph but lacks one.
+    """Append ``graph export`` after each graph command that lacks one.
 
     Parameters
     ----------
     code:
         One or more Stata commands (may span multiple lines).
     tmpdir:
-        Temporary directory where the exported PNG should be written.
+        Temporary directory where the exported PNGs should be written.
 
     Returns
     -------
     str
-        The original *code* with an appended ``graph export`` line when
-        injection is appropriate, or the unchanged *code* otherwise.
+        The original *code* with ``graph export`` lines injected after
+        each graphing command, or the unchanged *code* if no injection
+        is needed.
     """
-    # Nothing to do if the code already exports a graph.
+    # If the code already contains a graph export, assume the user
+    # manages exports manually.
     if _HAS_EXPORT_RE.search(code):
         log.debug("Code already contains `graph export`; skipping injection.")
         return code
 
-    # Nothing to do if no graphing command is detected.
-    if not _GRAPH_CMD_RE.search(code):
+    # Find all graph command matches.
+    matches = list(_GRAPH_CMD_RE.finditer(code))
+    if not matches:
         return code
 
-    timestamp = int(time.time() * 1000)
-    export_path = tmpdir / f"stata_graph_{timestamp}.png"
+    # Insert an export after each graph command.  Work backwards so
+    # earlier insertion positions stay valid.
+    lines = code.split("\n")
+    result_lines = list(lines)  # mutable copy
+    inject_count = 0
 
-    export_line = f'\nquietly graph export "{export_path}", width(2000) replace'
-    log.info("Auto-injecting graph export: %s", export_path.name)
-    return code.rstrip() + export_line
+    for m in reversed(matches):
+        # Find which line number the match falls on.
+        char_pos = m.start()
+        line_idx = code[:char_pos].count("\n")
+
+        # Walk forward to find the end of the command (handle ///
+        # continuation lines).
+        end_idx = line_idx
+        while end_idx < len(result_lines) - 1:
+            stripped = result_lines[end_idx].rstrip()
+            if stripped.endswith("///"):
+                end_idx += 1
+            else:
+                break
+
+        timestamp = int(time.time() * 1000) + inject_count
+        export_path = tmpdir / f"stata_graph_{timestamp}.png"
+        export_line = f'quietly graph export "{export_path}", width(2000) replace'
+        log.info("Auto-injecting graph export: %s", export_path.name)
+
+        # Insert the export line after end_idx.
+        result_lines.insert(end_idx + 1, export_line)
+        inject_count += 1
+
+    return "\n".join(result_lines)
