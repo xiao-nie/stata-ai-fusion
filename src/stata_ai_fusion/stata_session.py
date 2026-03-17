@@ -14,6 +14,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -826,23 +827,29 @@ class BatchSession:
     def _run_batch(self, do_file: Path, log_file: Path, timeout: int) -> str:
         """Synchronous helper: run Stata in batch mode and read the log.
 
-        Uses Popen with start_new_session so the entire process group
+        Uses Popen with process group creation so the entire process group
         (including Stata-MP workers) can be killed on timeout.
         """
         stata_path = str(self.installation.path)
 
+        # Windows uses CREATE_NEW_PROCESS_GROUP, Unix uses start_new_session
         proc = subprocess.Popen(
             [stata_path, "-b", "do", str(do_file)],
             cwd=str(self._tmpdir),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+            start_new_session=False if sys.platform == "win32" else True,
         )
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                # Windows does not have os.killpg, use taskkill instead
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], check=False)
+                else:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
                 proc.kill()
             proc.wait()
@@ -896,7 +903,8 @@ class SessionManager:
         self._session_timeout = session_timeout
         self._last_activity: dict[str, float] = {}
         if use_batch is None:
-            self._use_batch = not HAS_PEXPECT
+            # Force batch mode on Windows (pexpect doesn't work there)
+            self._use_batch = not HAS_PEXPECT or sys.platform == "win32"
         else:
             self._use_batch = use_batch
 

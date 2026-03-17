@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"C:\\\\Program Files\" /b)",
+      "Bash(findstr -i stata)",
+      "Bash(echo \"STATA_PATH=$env:STATA_PATH\")",
+      "Bash(Test-Path \"$env:STATA_PATH\")",
+      "Bash(uv --version)",
+      "Bash(echo $STATA_PATH)",
+      "Read(//c/code/stata-ai-fusion/**)",
+      "Bash(cmd.exe /c \"echo STATA_PATH=%STATA_PATH%\")",
+      "Bash(powershell -Command \"Get-ChildItem Env:STATA_PATH\")",
+      "Bash(cmd /c \"echo STATA_PATH=%STATA_PATH% && if exist %STATA_PATH% \\(echo File exists\\) else \\(echo File not found\\)\")",
+      "Bash(python -c \"import os; print\\(''STATA_PATH:'', os.environ.get\\(''STATA_PATH'', ''未设置''\\)\\)\")",
+      "Bash(python -c \"import os; p = os.environ.get\\(''STATA_PATH''\\); print\\(''路径存在'' if p and __import__\\(''pathlib''\\).Path\\(p\\).exists\\(\\) else ''路径不存在''\\)\")",
+      "Bash(STATA_PATH=\"C:/Program Files/StataNow19/StataMP-64.exe\" python -c \":*)",
+      "Bash(STATA_PATH=\"C:/Program Files/StataNow19/StataMP-64.exe\" python -m pip show stata-ai-fusion)",
+      "Bash(STATA_PATH=\"C:/Program Files/StataNow19/StataMP-64.exe\" uv run --from stata-ai-fusion stata-ai-fusion --help)",
+      "Bash(uv run:*)",
+      "Bash(uv pip:*)",
+      "Bash(claude mcp:*)",
+      "Bash(where.exe git:*)",
+      "Read(//d/Program Files/Git/bin/**)",
+      "Read(//c/xiaonie/Tencent/Git/usr/bin/**)",
+      "Bash(export CLAUDE_CODE_GIT_BASH_PATH=\"C:/xiaonie/Tencent/Git/usr/bin/bash.exe\")",
+      "Bash(cmd.exe /c \"set CLAUDE_CODE_GIT_BASH_PATH=C:\\\\xiaonie\\\\Tencent\\\\Git\\\\usr\\\\bin\\\\bash.exe && claude mcp list\")",
+      "Bash(\"C:/xiaonie/Tencent/Git/usr/bin/bash.exe\" -c \"claude mcp list\")",
+      "Bash(where.exe claude:*)",
+      "Read(//c/Users/administered/.local/bin/**)",
+      "Read(//c/Users/administered/AppData/Roaming/npm-global/**)",
+      "Bash(node \"C:/Users/administered/AppData/Roaming/npm-global/node_modules/@anthropic-ai/claude-code/cli.js\" mcp list)",
+      "Read(//c/Users/administered/**)",
+      "Bash(node -e \"console.log\\(process.env.PATH\\)\")",
+      "Bash(tr ';' '\\\\n')",
+      "Bash(node -e \"const fs=require\\(''fs''\\); const c=JSON.parse\\(fs.readFileSync\\(process.env.USERPROFILE+''/.claude.json''\\)\\); console.log\\(JSON.stringify\\(c.mcpServers||{}, null, 2\\)\\)\")",
+      "Bash(STATA_PATH=\"C:/Program Files/StataNow19/StataMP-64.exe\" uv run python -c \":*)",
+      "Bash(node -e \"const fs=require\\(''fs''\\); const c=JSON.parse\\(fs.readFileSync\\(process.env.USERPROFILE+''/.claude.json''\\)\\); console.log\\(JSON.stringify\\(c.mcpServers.stata, null, 2\\)\\)\")",
+      "Bash(node -e \"const fs=require\\(''fs''\\); const c=JSON.parse\\(fs.readFileSync\\(process.env.USERPROFILE+''/.claude.json''\\)\\); console.log\\(''stata mcp config:'', JSON.stringify\\(c.mcpServers.stata, null, 2\\)\\)\")",
+      "Bash(STATA_PATH=\"C:/Program Files/StataNow19/StataMP-64.exe\" timeout 10 uv run python -m stata_ai_fusion)"
+    ]
+  }
+}
